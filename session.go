@@ -48,6 +48,44 @@ func (c *SQLiteConn) Session(database string) (*SQLiteSession, error) {
 	return session, nil
 }
 
+// Attach a table to this session.
+//
+// All subsequent changes made to the table while the session object is enabled
+// will be recorded.
+//
+// If an empty string is passed, then changes are recorded for all tables in
+// the database.
+func (s *SQLiteSession) Attach(table string) error {
+	var tableptr *C.char
+	if table != "" {
+		tableptr = C.CString(table)
+		defer C.free(unsafe.Pointer(tableptr))
+	}
+
+	rv := C.sqlite3session_attach(s.s, tableptr)
+
+	if rv != C.SQLITE_OK {
+		return Error{Code: ErrNo(rv)}
+	}
+
+	return nil
+}
+
+// ChangeSet obtains a changeset containing changes to the tables attached to
+// this session.
+func (s *SQLiteSession) ChangeSet() (*SQLiteChangeSet, error) {
+	changeset := &SQLiteChangeSet{}
+
+	rv := C.sqlite3session_changeset(s.s, &changeset.n, &changeset.data)
+
+	if rv != C.SQLITE_OK {
+		return nil, Error{Code: ErrNo(rv)}
+	}
+
+	runtime.SetFinalizer(changeset, (*SQLiteSession).Finish)
+	return changeset, nil
+}
+
 // Finish deletes the session.
 func (s *SQLiteSession) Finish() error {
 	return s.Close()
@@ -62,4 +100,32 @@ func (s *SQLiteSession) Close() error {
 	runtime.SetFinalizer(s, nil)
 
 	return nil
+}
+
+// SQLiteChangeSet implement interface of ChangeSet.
+type SQLiteChangeSet struct {
+	n    C.int          // Size of the data buffer
+	data unsafe.Pointer // Data buffer
+}
+
+// Bytes returns a copy of the data contained in this change set.
+func (c *SQLiteChangeSet) Bytes() []byte {
+	return C.GoBytes(c.data, c.n)
+}
+
+// Close releases the memory allocated for this change set.
+func (c *SQLiteChangeSet) Close() error {
+	C.free(c.data)
+
+	c.n = 0
+	c.data = nil
+
+	runtime.SetFinalizer(c, nil)
+
+	return nil
+}
+
+// Finish deletes this change set
+func (c *SQLiteChangeSet) Finish() error {
+	return c.Close()
 }
