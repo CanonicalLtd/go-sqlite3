@@ -6,6 +6,7 @@ env:
   - GOTAGS=libsqlite3
   - GOTAGS=trace
   - GOTAGS=vtable
+  - GOTAGS=session
 go:
   - 1.7.x
   - 1.8.x
