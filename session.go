@@ -113,6 +113,19 @@ func (c *SQLiteChangeSet) Bytes() []byte {
 	return C.GoBytes(c.data, c.n)
 }
 
+// Apply a changeset to a database.
+//
+// The underlying schema must match the one the change set was taken on.
+func (c *SQLiteChangeSet) Apply(conn *SQLiteConn) error {
+	rv := C.sqlite3changeset_apply(conn.db, c.n, c.data, nil, nil, nil)
+
+	if rv != C.SQLITE_OK {
+		return Error{Code: ErrNo(rv)}
+	}
+
+	return nil
+}
+
 // Close releases the memory allocated for this change set.
 func (c *SQLiteChangeSet) Close() error {
 	C.free(c.data)

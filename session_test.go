@@ -9,6 +9,7 @@ package sqlite3
 import (
 	"database/sql"
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -110,6 +111,45 @@ func TestSessionAttachAllTables(t *testing.T) {
 
 }
 
+func TestSessionApplyChangeSet(t *testing.T) {
+	db, session, cleanup := testSessionOpen(t, "applyChangeSet")
+	defer cleanup()
+
+	if err := session.Attach(""); err != nil {
+		t.Fatal("Failed to attach all tables to test session:", err)
+	}
+	testSessionCreateTables(t, db)
+
+	db2, conn, cleanup := testSessionOpenTarget(t, "applyChangeSet_target")
+	defer cleanup()
+	testSessionCreateTables(t, db2)
+
+	// Insert a few rows in both test1 and test2.
+	testSessionInsert(t, db, "test1", 1, "hello")
+	testSessionInsert(t, db, "test1", 2, "hi")
+	testSessionInsert(t, db, "test2", 1, "hello")
+
+	changeset, err := session.ChangeSet()
+	if err != nil {
+		t.Fatal("Failed to obtain change set after inserting into test tables:", err)
+	}
+
+	err = changeset.Apply(conn)
+	if err != nil {
+		t.Fatal("Failed to apply change set to target test connection:", err)
+	}
+
+	// The change set has been applied.
+	rows1 := testSessionSelect(t, db2, "test1")
+	if !reflect.DeepEqual(rows1, map[int]string{1: "hello", 2: "hi"}) {
+		t.Fatal("Unexpected rows in table 'test1':", rows1)
+	}
+	rows2 := testSessionSelect(t, db2, "test2")
+	if !reflect.DeepEqual(rows2, map[int]string{1: "hello"}) {
+		t.Fatal("Unexpected rows in table 'test1':", rows2)
+	}
+}
+
 // Create a SQLiteSession object attached to an in-memory test database.
 //
 // Return the test database, the newly created session and a cleanup function
@@ -151,6 +191,41 @@ func testSessionOpen(t *testing.T, test string) (*sql.DB, *SQLiteSession, func()
 	return db, session, cleanup
 }
 
+// Create a sql.DB and underlying SQLiteConn object, to test applying a change
+// set.
+//
+// Return the test database, the newly created connection and a cleanup
+// function to safely the database.
+func testSessionOpenTarget(t *testing.T, test string) (*sql.DB, *SQLiteConn, func()) {
+	driverConns := []*SQLiteConn{}
+	driverName := fmt.Sprintf("sqlite3_testSession_%s", test)
+	sql.Register(driverName, &SQLiteDriver{
+		ConnectHook: func(conn *SQLiteConn) error {
+			driverConns = append(driverConns, conn)
+			return nil
+		},
+	})
+
+	db, err := sql.Open(driverName, ":memory:")
+	if err != nil {
+		t.Fatal("Failed to open the session test target database:", err)
+	}
+
+	if err := db.Ping(); err != nil {
+		t.Fatal("Failed to connect to the session test target database:", err)
+	}
+
+	conn := driverConns[0]
+
+	cleanup := func() {
+		if err := db.Close(); err != nil {
+			t.Fatal("Failed to close the session test target database:", err)
+		}
+	}
+
+	return db, conn, cleanup
+}
+
 // Create test tables ('test1' and 'test2') to be used in session tests.
 func testSessionCreateTables(t *testing.T, db *sql.DB) {
 	for _, table := range []string{"test1", "test2"} {
@@ -168,4 +243,31 @@ func testSessionInsert(t *testing.T, db *sql.DB, table string, id int, value str
 	if _, err := db.Exec(stmt, id, value); err != nil {
 		t.Fatalf("Failed to insert row (%d, %s) into table '%s': %v", id, value, table, err)
 	}
+}
+
+// Return all rows in the given test table, grouped by id.
+func testSessionSelect(t *testing.T, db *sql.DB, table string) map[int]string {
+	stmt := fmt.Sprintf("SELECT id, value FROM %s", table)
+	rows, err := db.Query(stmt)
+	if err != nil {
+		t.Fatalf("Failed to select rows from test table '%s': %v", table, err)
+	}
+	defer rows.Close()
+
+	result := make(map[int]string)
+	for rows.Next() {
+		var id int
+		var value string
+		err := rows.Scan(&id, &value)
+		if err != nil {
+			t.Fatalf("Failed to scan row from test table '%s': %v", table, err)
+		}
+	}
+
+	err = rows.Err()
+	if err != nil {
+		t.Fatalf("Error while selecting rows from test table '%s': %v", table, err)
+	}
+
+	return result
 }
