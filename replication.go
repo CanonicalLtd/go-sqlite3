@@ -30,12 +30,21 @@ static sqlite3_replication_methods replicationMethods = {
 // opcode, since there's no way to use C varargs from Go.
 static int replicationConfig() {
   int rc = sqlite3_config(SQLITE_CONFIG_REPLICATION, &replicationMethods);
+  sqlite3_replication_methods currentMethods;
 
   // TODO: this retry will revert all previous initialization. We should find a better way.
   if( rc!=SQLITE_OK ){
-    rc = sqlite3_shutdown();
+    rc = sqlite3_config(SQLITE_CONFIG_GETREPLICATION, &currentMethods);
     if( rc==SQLITE_OK ){
-      rc = sqlite3_config(SQLITE_CONFIG_REPLICATION, &replicationMethods);
+      if (&currentMethods != &replicationMethods){
+        rc = SQLITE_ERROR;
+      }
+    }
+    if( rc!=SQLITE_OK ){
+      rc = sqlite3_shutdown();
+      if( rc==SQLITE_OK ){
+        rc = sqlite3_config(SQLITE_CONFIG_REPLICATION, &replicationMethods);
+      }
     }
   }
 
