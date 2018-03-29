@@ -88,7 +88,7 @@ func init() {
 	// Register the replication implementation
 	rc := C.replicationConfig()
 	if rc != C.SQLITE_OK {
-		panic("failed to configure SQLite replication")
+		//panic("failed to configure SQLite replication")
 	}
 }
 
