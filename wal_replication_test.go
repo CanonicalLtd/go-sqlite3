@@ -6,32 +6,21 @@ import (
 	"testing"
 )
 
-func TestReplicationPages(t *testing.T) {
-	pages := NewReplicationPages(2, 4096)
-	if len(pages) != 2 {
-		t.Fatalf("Got %d pages instead of 2", len(pages))
+// Register and unregister a WAL replication implementation.
+func TestWalReplicationRegistration(t *testing.T) {
+	replication := NoopWalReplication()
+
+	if err := WalReplicationRegister("noop", replication); err != nil {
+		t.Fatal("WAL replication registration failed", err)
 	}
-	for i, page := range pages {
-		if page.Data() == nil {
-			t.Errorf("The data buffer for page %d is not allocated", i)
-		}
-		if n := len(page.Data()); n != 4096 {
-			t.Errorf("The data buffer for page %d has unexpected lenght %d", i, n)
-		}
-		page.Fill([]byte("hello"), 1, uint32(i))
-		if string(page.Data()) != "hello" {
-			t.Errorf("The data buffer for page %d does not match the given bytes", i)
-		}
-		if page.Flags() != 1 {
-			t.Errorf("Failed to fill flags for page %d", i)
-		}
-		if page.Number() != uint32(i) {
-			t.Errorf("Failed to fill number for page %d", i)
-		}
+
+	if err := WalReplicationUnregister(replication); err != nil {
+		t.Fatal("WAL replication unregistration failed", err)
 	}
 }
 
-func TestReplicationModesErrors(t *testing.T) {
+// Exercise failure modes when enabling WAL replication.
+func TestWalReplication_EnableErrors(t *testing.T) {
 	cases := []struct {
 		name string                                     // Name of the test
 		f    func(t *testing.T, conn *SQLiteConn) error // Scenario leading to an error
@@ -39,64 +28,64 @@ func TestReplicationModesErrors(t *testing.T) {
 		{
 			"connection not in WAL mode: follower",
 			func(t *testing.T, conn *SQLiteConn) error {
-				return conn.ReplicationLeader(NoopReplicationMethods())
+				return conn.WalReplicationLeader("noop")
 			},
 		},
 		{
 			"connection not in WAL mode: leader",
 			func(t *testing.T, conn *SQLiteConn) error {
-				return conn.ReplicationFollower()
+				return conn.WalReplicationFollower()
 			},
 		},
 		{
 			"cannot set twice: leader",
 			func(t *testing.T, conn *SQLiteConn) error {
 				pragmaWAL(t, conn)
-				err := conn.ReplicationLeader(NoopReplicationMethods())
+				err := conn.WalReplicationLeader("noop")
 				if err != nil {
 					t.Fatal("failed to set leader replication:", err)
 				}
-				return conn.ReplicationLeader(NoopReplicationMethods())
+				return conn.WalReplicationLeader("noop")
 			},
 		},
 		{
 			"cannot set twice: follower",
 			func(t *testing.T, conn *SQLiteConn) error {
 				pragmaWAL(t, conn)
-				err := conn.ReplicationFollower()
+				err := conn.WalReplicationFollower()
 				if err != nil {
 					t.Fatal("failed to set follower replication:", err)
 				}
-				return conn.ReplicationFollower()
+				return conn.WalReplicationFollower()
 			},
 		},
 		{
 			"cannot switch from leader to follower",
 			func(t *testing.T, conn *SQLiteConn) error {
 				pragmaWAL(t, conn)
-				err := conn.ReplicationLeader(NoopReplicationMethods())
+				err := conn.WalReplicationLeader("noop")
 				if err != nil {
 					t.Fatal("failed to set leader replication:", err)
 				}
-				return conn.ReplicationFollower()
+				return conn.WalReplicationFollower()
 			},
 		},
 		{
 			"cannot switch from follower to leader",
 			func(t *testing.T, conn *SQLiteConn) error {
 				pragmaWAL(t, conn)
-				err := conn.ReplicationFollower()
+				err := conn.WalReplicationFollower()
 				if err != nil {
 					t.Fatal("failed to set follower replication:", err)
 				}
-				return conn.ReplicationLeader(NoopReplicationMethods())
+				return conn.WalReplicationLeader("noop")
 			},
 		},
 		{
 			"cannot run queries as follower",
 			func(t *testing.T, conn *SQLiteConn) error {
 				pragmaWAL(t, conn)
-				err := conn.ReplicationFollower()
+				err := conn.WalReplicationFollower()
 				if err != nil {
 					t.Fatal("failed to set follower replication:", err)
 				}
@@ -109,6 +98,12 @@ func TestReplicationModesErrors(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			tempFilename := TempFilename(t)
 			defer os.Remove(tempFilename)
+
+			replication := NoopWalReplication()
+			if err := WalReplicationRegister("noop", replication); err != nil {
+				t.Fatal("WAL replication registration failed", err)
+			}
+			defer WalReplicationUnregister(replication)
 
 			driver := &SQLiteDriver{}
 			conn, err := driver.Open(tempFilename)
@@ -134,7 +129,7 @@ func TestReplicationModesErrors(t *testing.T) {
 	}
 }
 
-func TestReplicationMethods(t *testing.T) {
+func TestWalReplication(t *testing.T) {
 	conns := make([]*SQLiteConn, 2) // Index 0 is the leader and index 1 is the follower
 
 	// Open the connections.
@@ -155,16 +150,21 @@ func TestReplicationMethods(t *testing.T) {
 	leader := conns[0]
 	follower := conns[1]
 
-	// Set leader replication on conn 0.
-	methods := &directReplicationMethods{
+	replication := &directWalReplication{
 		follower: follower,
 	}
-	if err := leader.ReplicationLeader(methods); err != nil {
+	if err := WalReplicationRegister("direct", replication); err != nil {
+		t.Fatal("WAL replication registration failed", err)
+	}
+	defer WalReplicationUnregister(replication)
+
+	// Set leader replication on conn 0.
+	if err := leader.WalReplicationLeader("direct"); err != nil {
 		t.Fatal("failed to switch to leader replication:", err)
 	}
 
 	// Set follower replication on conn 1.
-	if err := follower.ReplicationFollower(); err != nil {
+	if err := follower.WalReplicationFollower(); err != nil {
 		t.Fatal("failed to switch to follower replication:", err)
 	}
 
@@ -179,7 +179,7 @@ func TestReplicationMethods(t *testing.T) {
 	}
 
 	// Check that the follower has replicated the commit but not the rollback.
-	if err := follower.ReplicationNone(); err != nil {
+	if err := follower.WalReplicationNone(); err != nil {
 		t.Fatal("failed to turn off follower replication:", err)
 	}
 	if _, err := follower.Query("SELECT 1", nil); err != nil {
@@ -193,52 +193,9 @@ func TestReplicationMethods(t *testing.T) {
 	}
 }
 
-// ReplicationMethods implementation that replicates WAL commands directly
-// to the given follower.
-type directReplicationMethods struct {
-	follower *SQLiteConn
-	writing  bool
-}
-
-func (m *directReplicationMethods) Begin(conn *SQLiteConn) ErrNo {
-	return 0
-}
-
-func (m *directReplicationMethods) Abort(conn *SQLiteConn) ErrNo {
-	return 0
-}
-
-func (m *directReplicationMethods) Frames(conn *SQLiteConn, params *ReplicationFramesParams) ErrNo {
-	begin := false
-	if !m.writing {
-		begin = true
-		m.writing = true
-	}
-	if err := ReplicationFrames(m.follower, begin, params); err != nil {
-		panic(fmt.Sprintf("frames failed: %v", err))
-	}
-	if params.IsCommit == 1 {
-		m.writing = false
-	}
-	return 0
-}
-
-func (m *directReplicationMethods) Undo(conn *SQLiteConn) ErrNo {
-	if m.writing {
-		if err := ReplicationUndo(m.follower); err != nil {
-			panic(fmt.Sprintf("undo failed: %v", err))
-		}
-	}
-	return 0
-}
-
-func (m *directReplicationMethods) End(conn *SQLiteConn) ErrNo {
-	return 0
-}
-
 // An xBegin error never triggers an xUndo callback and SQLite takes care of
 // releasing the WAL write lock, if acquired.
-func TestReplicationMethods_BeginError(t *testing.T) {
+func TestWalReplication_BeginError(t *testing.T) {
 	// Open the leader connection.
 	cases := []struct {
 		errno ErrNoExtended
@@ -277,13 +234,18 @@ func TestReplicationMethods_BeginError(t *testing.T) {
 			pragmaWAL(t, conn)
 
 			// Set leader replication on conn 0.
-			methods := &failingReplicationMethods{
+			replication := &failingWalReplication{
 				conn:  conn,
 				hook:  "begin",
 				lock:  c.lock,
 				errno: c.errno,
 			}
-			if err := conn.ReplicationLeader(methods); err != nil {
+			if err := WalReplicationRegister("failing", replication); err != nil {
+				t.Fatal("WAL replication registration failed", err)
+			}
+			defer WalReplicationUnregister(replication)
+
+			if err := conn.WalReplicationLeader("failing"); err != nil {
 				t.Fatal("failed to switch to leader replication:", err)
 			}
 
@@ -318,7 +280,7 @@ func TestReplicationMethods_BeginError(t *testing.T) {
 			}
 
 			// Execute a second query with no error.
-			methods.hook = ""
+			replication.hook = ""
 			tx, err = conn.Begin()
 			if err != nil {
 				t.Fatal("failed to begin transaction", err)
@@ -335,7 +297,7 @@ func TestReplicationMethods_BeginError(t *testing.T) {
 }
 
 // An xFrames error triggers the xUndo callback.
-func TestReplicationMethods_FramesError(t *testing.T) {
+func TestWalReplication_FramesError(t *testing.T) {
 	// Create a leader connection with the appropriate
 	// replication methods.
 	driver := &SQLiteDriver{}
@@ -352,12 +314,17 @@ func TestReplicationMethods_FramesError(t *testing.T) {
 	pragmaWAL(t, conn)
 
 	// Set leader replication on conn 0.
-	methods := &failingReplicationMethods{
+	replication := &failingWalReplication{
 		conn:  conn,
 		hook:  "frames",
 		errno: ErrIoErrNotLeader,
 	}
-	if err := conn.ReplicationLeader(methods); err != nil {
+	if err := WalReplicationRegister("failing", replication); err != nil {
+		t.Fatal("WAL replication registration failed", err)
+	}
+	defer WalReplicationUnregister(replication)
+
+	if err := conn.WalReplicationLeader("failing"); err != nil {
 		t.Fatal("failed to switch to leader replication:", err)
 	}
 	_, err = conn.Exec("CREATE TABLE test (n INT)", nil)
@@ -368,12 +335,12 @@ func TestReplicationMethods_FramesError(t *testing.T) {
 	if erri.ExtendedCode != ErrIoErrNotLeader {
 		t.Errorf("expected error code %d, got %d", ErrIoErrNotLeader, erri.ExtendedCode)
 	}
-	if n := len(methods.fired); n != 4 {
+	if n := len(replication.fired); n != 4 {
 		t.Fatalf("expected 4 hooks to be fired, instead of %d", n)
 	}
 	hooks := []string{"begin", "frames", "undo", "end"}
-	for i := range methods.fired {
-		if hook := methods.fired[i]; hook != hooks[i] {
+	for i := range replication.fired {
+		if hook := replication.fired[i]; hook != hooks[i] {
 			t.Errorf("expected hook %s to be fired, instead of %s", hooks[i], hook)
 		}
 	}
@@ -397,31 +364,80 @@ func TestReplicationMethods_UndoError(t *testing.T) {
 	pragmaWAL(t, conn)
 
 	// Set leader replication on conn 0.
-	methods := &failingReplicationMethods{
+	replication := &failingWalReplication{
 		conn:  conn,
 		hook:  "undo",
 		errno: ErrIoErrNotLeader,
 	}
-	if err := conn.ReplicationLeader(methods); err != nil {
+	if err := WalReplicationRegister("failing", replication); err != nil {
+		t.Fatal("WAL replication registration failed", err)
+	}
+	defer WalReplicationUnregister(replication)
+
+	if err := conn.WalReplicationLeader("failing"); err != nil {
 		t.Fatal("failed to switch to leader replication:", err)
 	}
 	_, err = conn.Exec("BEGIN; CREATE TABLE test (n INT); ROLLBACK", nil)
 	if err != nil {
 		t.Fatal("rollback failed", err)
 	}
-	if n := len(methods.fired); n != 3 {
+	if n := len(replication.fired); n != 3 {
 		t.Fatalf("expected 3 hooks to be fired, instead of %d", n)
 	}
 	hooks := []string{"begin", "undo", "end"}
-	for i := range methods.fired {
-		if hook := methods.fired[i]; hook != hooks[i] {
+	for i := range replication.fired {
+		if hook := replication.fired[i]; hook != hooks[i] {
 			t.Errorf("expected hook %s to be fired, instead of %s", hooks[i], hook)
 		}
 	}
 }
 
-// ReplicationMethods implementation that fails in a programmable way.
-type failingReplicationMethods struct {
+// WalReplication implementation that replicates WAL commands directly to the
+// given follower.
+type directWalReplication struct {
+	follower *SQLiteConn
+	writing  bool
+}
+
+func (r *directWalReplication) Begin(conn *SQLiteConn) ErrNo {
+	return 0
+}
+
+func (r *directWalReplication) Abort(conn *SQLiteConn) ErrNo {
+	return 0
+}
+
+func (r *directWalReplication) Frames(conn *SQLiteConn, frames WalReplicationFrames) ErrNo {
+	begin := false
+	if !r.writing {
+		begin = true
+		r.writing = true
+	}
+
+	if err := r.follower.WalReplicationFrames(begin, frames); err != nil {
+		panic(fmt.Sprintf("frames failed: %v", err))
+	}
+	if frames.IsCommit == 1 {
+		r.writing = false
+	}
+	return 0
+}
+
+func (r *directWalReplication) Undo(conn *SQLiteConn) ErrNo {
+	if r.writing {
+		if err := r.follower.WalReplicationUndo(); err != nil {
+			panic(fmt.Sprintf("undo failed: %v", err))
+		}
+	}
+	return 0
+}
+
+func (r *directWalReplication) End(conn *SQLiteConn) ErrNo {
+	return 0
+}
+
+// WalReplication implementation that fails in a programmable way.
+type failingWalReplication struct {
 	conn  *SQLiteConn   // Leader connection
 	lock  bool          // Whether to acquire the WAL write lock before failing
 	hook  string        // Name of the hook that should fail
@@ -429,51 +445,51 @@ type failingReplicationMethods struct {
 	fired []string      // Hooks that were fired
 }
 
-func (m *failingReplicationMethods) Begin(conn *SQLiteConn) ErrNo {
-	m.fired = append(m.fired, "begin")
+func (r *failingWalReplication) Begin(conn *SQLiteConn) ErrNo {
+	r.fired = append(r.fired, "begin")
 
-	if m.hook == "begin" {
-		return ErrNo(m.errno)
+	if r.hook == "begin" {
+		return ErrNo(r.errno)
 	}
 
 	return 0
 }
 
-func (m *failingReplicationMethods) Abort(conn *SQLiteConn) ErrNo {
+func (r *failingWalReplication) Abort(conn *SQLiteConn) ErrNo {
 	return 0
 }
 
-func (m *failingReplicationMethods) Frames(conn *SQLiteConn, params *ReplicationFramesParams) ErrNo {
-	m.fired = append(m.fired, "frames")
+func (r *failingWalReplication) Frames(conn *SQLiteConn, frames WalReplicationFrames) ErrNo {
+	r.fired = append(r.fired, "frames")
 
-	if m.hook == "begin" {
+	if r.hook == "begin" {
 		panic("frames hook should not be reached")
 	}
-	if m.hook == "frames" {
-		return ErrNo(m.errno)
+	if r.hook == "frames" {
+		return ErrNo(r.errno)
 	}
 
 	return 0
 }
 
-func (m *failingReplicationMethods) Undo(conn *SQLiteConn) ErrNo {
-	m.fired = append(m.fired, "undo")
+func (r *failingWalReplication) Undo(conn *SQLiteConn) ErrNo {
+	r.fired = append(r.fired, "undo")
 
-	if m.hook == "begin" {
+	if r.hook == "begin" {
 		panic("undo hook should not be reached")
 	}
-	if m.hook == "undo" {
-		return ErrNo(m.errno)
+	if r.hook == "undo" {
+		return ErrNo(r.errno)
 	}
 
 	return 0
 }
 
-func (m *failingReplicationMethods) End(conn *SQLiteConn) ErrNo {
-	m.fired = append(m.fired, "end")
+func (r *failingWalReplication) End(conn *SQLiteConn) ErrNo {
+	r.fired = append(r.fired, "end")
 
-	if m.hook == "end" {
-		return ErrNo(m.errno)
+	if r.hook == "end" {
+		return ErrNo(r.errno)
 	}
 
 	return 0
