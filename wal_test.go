@@ -97,7 +97,6 @@ func pragmaWAL(t *testing.T, conn *SQLiteConn) {
 	if _, err := conn.Exec("PRAGMA journal_mode=WAL;", nil); err != nil {
 		t.Fatal("Failed to Exec PRAGMA journal_mode:", err)
 	}
-
 	rows, err := conn.Query("PRAGMA journal_mode", nil)
 	if err != nil {
 		t.Fatal("Failed to Query PRAGMA journal_mode", err)
