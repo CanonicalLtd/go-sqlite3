@@ -12,7 +12,7 @@ package sqlite3
 int walReplicationBegin(int iReplication, int iConn);
 int walReplicationAbort(int iReplication, int iConn);
 int walReplicationFrames(int iReplication, int iConn,
-      int, int, sqlite3_wal_replication_frame*, unsigned, int, unsigned);
+      int, int, sqlite3_wal_replication_frame*, unsigned, int);
 int walReplicationUndo(int iReplication, int iConn);
 int walReplicationEnd(int iReplication, int iConn);
 
@@ -30,13 +30,13 @@ static int sqlite3WalReplicationAbort(sqlite3_wal_replication *p, void *pArg){
 }
 
 static int sqlite3WalReplicationFrames(sqlite3_wal_replication *p, void *pArg,
-      int szPage, int nList, sqlite3_wal_replication_frame *pList,
-       unsigned nTruncate, int isCommit, unsigned sync_flags
+      int szPage, int nFrame, sqlite3_wal_replication_frame *aFrame,
+       unsigned nTruncate, int isCommit
 ){
   int iReplication = *(int*)(p->pAppData);
   int iConn = *(int*)(pArg);
   return walReplicationFrames(
-      iReplication, iConn, szPage, nList, pList, nTruncate, isCommit, sync_flags);
+      iReplication, iConn, szPage, nFrame, aFrame, nTruncate, isCommit);
 }
 
 static int sqlite3WalReplicationUndo(sqlite3_wal_replication *p, void *pArg){
@@ -63,6 +63,7 @@ static int sqlite3WalReplicationRegister(char *zName, int iReplication){
 
   pAppData = (void*)malloc(sizeof(int));
   if( !pAppData ){
+    sqlite3_free(p);
     return SQLITE_NOMEM;
   }
   *(int*)(pAppData) = iReplication;
@@ -99,7 +100,6 @@ static int sqlite3WalReplicationUnregister(char *zName) {
 
   return SQLITE_OK;
 }
-
 */
 import "C"
 import (
@@ -107,17 +107,103 @@ import (
 	"unsafe"
 )
 
-// WalReplicationFrames information about a single batch of WAL frames that are
-// being dispatched for replication. They map to the parameters of the
-// sqlite3_wal_replication.xFrames API and sqlite3_wal_replication_frames C
-// APIs.
-type WalReplicationFrames struct {
-	PageSize  int
-	Len       int
-	List      unsafe.Pointer
-	Truncate  uint32
-	IsCommit  int
-	SyncFlags uint8
+// PageNumber identifies a single database or WAL page.
+type PageNumber C.unsigned
+
+// FrameNumber identifies a single frame in the WAL.
+type FrameNumber C.unsigned
+
+// WalReplicationFrameList holds information about a single batch of WAL frames
+// that are being dispatched for replication by a leader connection.
+//
+// They map to the parameters of the sqlite3_wal_replication.xFrames API
+type WalReplicationFrameList struct {
+	szPage    C.int
+	nFrame    C.int
+	aFrame    *C.sqlite3_wal_replication_frame
+	nTruncate C.uint
+	isCommit  C.int
+}
+
+// PageSize returns the page size of this batch of WAL frames.
+func (l *WalReplicationFrameList) PageSize() int {
+	return int(l.szPage)
+}
+
+// Len returns the number of WAL frames in this batch.
+func (l *WalReplicationFrameList) Len() int {
+	return int(l.nFrame)
+}
+
+// Truncate returns the size of the database in pages after this batch of WAL
+// frames is applied.
+func (l *WalReplicationFrameList) Truncate() uint {
+	return uint(l.nTruncate)
+}
+
+// Frame returns information about the i'th frame in the batch.
+func (l *WalReplicationFrameList) Frame(i int) (unsafe.Pointer, PageNumber, FrameNumber) {
+	pFrame := (*C.sqlite3_wal_replication_frame)(unsafe.Pointer(
+		uintptr(unsafe.Pointer(l.aFrame)) +
+			unsafe.Sizeof(*l.aFrame)*uintptr(i),
+	))
+	return pFrame.pBuf, PageNumber(pFrame.pgno), FrameNumber(pFrame.iPrev)
+}
+
+// IsCommit returns whether this batch of WAL frames concludes a transaction.
+func (l *WalReplicationFrameList) IsCommit() bool {
+	return l.isCommit > 0
+}
+
+// WalReplicationFrameInfo information about a single batch of WAL frames that
+// are being replicated by a follower connection.
+type WalReplicationFrameInfo struct {
+	isBegin   C.int
+	szPage    C.int
+	nFrame    C.int
+	aPgno     *C.unsigned
+	aPage     unsafe.Pointer
+	nTruncate C.uint
+	isCommit  C.int
+}
+
+// IsBegin sets the C isBegin parameter for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) IsBegin(flag bool) {
+	if flag {
+		i.isBegin = C.int(1)
+	} else {
+		i.isBegin = C.int(0)
+	}
+}
+
+// PageSize sets the C szPage parameter for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) PageSize(size int) {
+	i.szPage = C.int(size)
+}
+
+// Len sets the C nFrame parameter for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) Len(n int) {
+	i.nFrame = C.int(n)
+}
+
+// Pages sets the C aPgno and aPage parameters for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) Pages(numbers []PageNumber, data unsafe.Pointer) {
+	i.aPgno = (*C.unsigned)(&numbers[0])
+	i.aPage = data
+}
+
+// Truncate sets the nTruncate parameter for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) Truncate(truncate uint) {
+	i.nTruncate = C.unsigned(truncate)
+}
+
+// IsCommit sets the isCommit parameter for sqlite3_wal_replication_frames.
+func (i *WalReplicationFrameInfo) IsCommit(flag bool) {
+	if flag {
+		i.isCommit = C.int(1)
+	} else {
+		i.isCommit = C.int(0)
+	}
 }
 
 // WalReplication offers a Go-friendly interface around the low level
@@ -137,7 +223,7 @@ type WalReplication interface {
 
 	// Write new frames to the write-ahead log. The implementation should
 	// broadcast this write to other nodes and wait for a quorum.
-	Frames(*SQLiteConn, WalReplicationFrames) ErrNo
+	Frames(*SQLiteConn, WalReplicationFrameList) ErrNo
 
 	// Undo a write transaction. The implementation should broadcast
 	// this event to other nodes and wait for a quorum. The return code
@@ -309,23 +395,14 @@ func (c *SQLiteConn) WalReplicationNone() error {
 }
 
 // WalReplicationFrames writes the given batch of frames to the write-ahead log
-// linked to the given connection. This should be called with a "follower"
-// connection, meant to replicate the "leader" one.
-func (c *SQLiteConn) WalReplicationFrames(begin bool, frames WalReplicationFrames) error {
-	// Convert to C types
-	isBegin := C.int(0)
-	if begin {
-		isBegin = C.int(1)
-	}
-	szPage := C.int(frames.PageSize)
-	nList := C.int(frames.Len)
-	nTruncate := C.uint(frames.Truncate)
-	isCommit := C.int(frames.IsCommit)
-	syncFlags := C.int(frames.SyncFlags)
-
-	pList := (*C.sqlite3_wal_replication_frame)(frames.List)
+// linked to the given connection.
+//
+// This method must be called with a "follower" connection, meant to replicate
+// the "leader" one.
+func (c *SQLiteConn) WalReplicationFrames(info WalReplicationFrameInfo) error {
 	rc := C.sqlite3_wal_replication_frames(
-		c.db, walReplicationSchema, isBegin, szPage, nList, pList, nTruncate, isCommit, syncFlags)
+		c.db, walReplicationSchema, info.isBegin, info.szPage, info.nFrame,
+		info.aPgno, info.aPage, info.nTruncate, info.isCommit)
 	if rc != C.SQLITE_OK {
 		return newError(rc)
 	}
@@ -347,28 +424,28 @@ func (c *SQLiteConn) WalReplicationUndo() error {
 // NoopWalReplication returns a new instance of a WalReplication implementation
 // whose hooks do nothing.
 func NoopWalReplication() WalReplication {
-	return &noopReplicationMethods{}
+	return &noopWalReplication{}
 }
 
-type noopReplicationMethods struct{}
+type noopWalReplication struct{}
 
-func (m *noopReplicationMethods) Begin(conn *SQLiteConn) ErrNo {
+func (m *noopWalReplication) Begin(*SQLiteConn) ErrNo {
 	return 0
 }
 
-func (m *noopReplicationMethods) Abort(conn *SQLiteConn) ErrNo {
+func (m *noopWalReplication) Abort(*SQLiteConn) ErrNo {
 	return 0
 }
 
-func (m *noopReplicationMethods) Frames(conn *SQLiteConn, params WalReplicationFrames) ErrNo {
+func (m *noopWalReplication) Frames(*SQLiteConn, WalReplicationFrameList) ErrNo {
 	return 0
 }
 
-func (m *noopReplicationMethods) Undo(conn *SQLiteConn) ErrNo {
+func (m *noopWalReplication) Undo(*SQLiteConn) ErrNo {
 	return 0
 }
 
-func (m *noopReplicationMethods) End(conn *SQLiteConn) ErrNo {
+func (m *noopWalReplication) End(*SQLiteConn) ErrNo {
 	return 0
 }
 
@@ -391,24 +468,22 @@ func walReplicationFrames(
 	iReplication C.int,
 	iConn C.int,
 	szPage C.int,
-	nList C.int,
-	pList *C.sqlite3_wal_replication_frame,
+	nFrame C.int,
+	aFrame *C.sqlite3_wal_replication_frame,
 	nTruncate C.uint,
 	isCommit C.int,
-	syncFlags C.uint,
 ) C.int {
 	replication, conn := walReplicationConnLookup(iReplication, iConn)
 
-	frames := WalReplicationFrames{
-		PageSize:  int(szPage),
-		Len:       int(nList),
-		List:      unsafe.Pointer(pList),
-		Truncate:  uint32(nTruncate),
-		IsCommit:  int(isCommit),
-		SyncFlags: uint8(syncFlags),
+	list := WalReplicationFrameList{
+		szPage:    szPage,
+		nFrame:    nFrame,
+		aFrame:    aFrame,
+		nTruncate: nTruncate,
+		isCommit:  isCommit,
 	}
 
-	return C.int(replication.Frames(conn, frames))
+	return C.int(replication.Frames(conn, list))
 }
 
 //export walReplicationUndo

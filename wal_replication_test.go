@@ -3,7 +3,9 @@ package sqlite3
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
+	"unsafe"
 )
 
 // Register and unregister a WAL replication implementation.
@@ -136,7 +138,7 @@ func TestWalReplication(t *testing.T) {
 	driver := &SQLiteDriver{}
 	for i := range conns {
 		tempFilename := TempFilename(t)
-		defer os.Remove(tempFilename)
+		//defer os.Remove(tempFilename)
 		conn, err := driver.Open(tempFilename)
 		if err != nil {
 			t.Fatalf("can't open connection to %s: %v", tempFilename, err)
@@ -407,17 +409,40 @@ func (r *directWalReplication) Abort(conn *SQLiteConn) ErrNo {
 	return 0
 }
 
-func (r *directWalReplication) Frames(conn *SQLiteConn, frames WalReplicationFrames) ErrNo {
+func (r *directWalReplication) Frames(conn *SQLiteConn, list WalReplicationFrameList) ErrNo {
 	begin := false
 	if !r.writing {
 		begin = true
 		r.writing = true
 	}
 
-	if err := r.follower.WalReplicationFrames(begin, frames); err != nil {
+	pageSize := list.PageSize()
+	length := list.Len()
+
+	info := WalReplicationFrameInfo{}
+	info.IsBegin(begin)
+	info.PageSize(pageSize)
+	info.Len(length)
+	info.Truncate(list.Truncate())
+	info.IsCommit(list.IsCommit())
+
+	numbers := make([]PageNumber, length)
+	pages := make([]byte, length*pageSize)
+	for i := range numbers {
+		data, pgno, _ := list.Frame(i)
+		numbers[i] = pgno
+		header := reflect.SliceHeader{Data: uintptr(data), Len: pageSize, Cap: pageSize}
+		var slice []byte
+		slice = reflect.NewAt(reflect.TypeOf(slice), unsafe.Pointer(&header)).Elem().Interface().([]byte)
+		copy(pages[i*pageSize:(i+1)*pageSize], slice)
+	}
+	info.Pages(numbers, unsafe.Pointer(&pages[0]))
+
+	if err := r.follower.WalReplicationFrames(info); err != nil {
 		panic(fmt.Sprintf("frames failed: %v", err))
 	}
-	if frames.IsCommit == 1 {
+
+	if list.IsCommit() {
 		r.writing = false
 	}
 	return 0
@@ -459,7 +484,7 @@ func (r *failingWalReplication) Abort(conn *SQLiteConn) ErrNo {
 	return 0
 }
 
-func (r *failingWalReplication) Frames(conn *SQLiteConn, frames WalReplicationFrames) ErrNo {
+func (r *failingWalReplication) Frames(conn *SQLiteConn, list WalReplicationFrameList) ErrNo {
 	r.fired = append(r.fired, "frames")
 
 	if r.hook == "begin" {
